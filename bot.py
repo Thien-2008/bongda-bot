@@ -1,4 +1,4 @@
-# Bot Bóng Đá 24H v2.1 - Fix scheduler + post_init
+# Bot Bóng Đá 24H v2.2
 import os
 import asyncio
 import logging
@@ -10,8 +10,7 @@ from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Bot
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    filters, ContextTypes
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 from google import genai
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -50,23 +49,20 @@ RSS_FEEDS = [
 def ai_generate(prompt):
     try:
         response = client_ai.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash",
             contents=prompt
         )
         return response.text
     except Exception as e:
-        logging.error(f"AI error: {e}")
+        logging.error(f"Lỗi AI: {e}")
         return None
 
 async def rewrite_with_ai(title, summary):
-    prompt = f"""Viết lại tin bóng đá sau theo phong cách hấp dẫn, ngắn gọn bằng tiếng Việt.
-Thêm emoji phù hợp. KHÔNG copy nguyên văn. Tối đa 200 từ.
-Tiêu đề gốc: {title}
-Nội dung gốc: {summary}
-Định dạng:
-**[TIÊU ĐỀ HAY]**
-[NỘI DUNG]
-#BongDa24H #BóngĐá"""
+    prompt = (
+        f"Viết lại tin bóng đá sau bằng tiếng Việt, hấp dẫn, có emoji, KHÔNG copy nguyên văn, tối đa 200 từ.\n"
+        f"Tiêu đề: {title}\nNội dung: {summary}\n"
+        f"Định dạng:\n**[TIÊU ĐỀ]**\n[NỘI DUNG]\n#BongDa24H"
+    )
     result = await asyncio.to_thread(ai_generate, prompt)
     return result or f"⚽ {title}\n\n{summary}\n\n#BongDa24H"
 
@@ -85,27 +81,31 @@ async def fetch_and_post_news(bot):
                 if exists:
                     continue
                 content = await rewrite_with_ai(title, summary)
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔗 Đọc thêm", url=link),
-                ]])
-                await bot.send_message(
-                    chat_id=CHANNEL_ID,
-                    text=content,
-                    parse_mode="Markdown",
-                    reply_markup=keyboard
-                )
+                try:
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔗 Đọc thêm", url=link),
+                    ]])
+                    await bot.send_message(
+                        chat_id=CHANNEL_ID,
+                        text=content,
+                        parse_mode="Markdown",
+                        reply_markup=keyboard
+                    )
+                except Exception as e:
+                    logging.error(f"Lỗi gửi tin: {e}")
+                    await bot.send_message(chat_id=CHANNEL_ID, text=content)
                 await news_col.insert_one({
                     "link": link, "title": title,
                     "posted_at": datetime.now()
                 })
                 posted += 1
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
         except Exception as e:
-            logging.error(f"RSS error: {e}")
+            logging.error(f"Lỗi RSS: {e}")
     return posted
 
 async def post_daily_schedule(bot):
-    prompt = "Tạo lịch thi đấu bóng đá hôm nay các giải lớn, giờ VN, format đẹp với emoji."
+    prompt = "Tạo lịch thi đấu bóng đá hôm nay các giải lớn, giờ Việt Nam, emoji đẹp, tối đa 20 trận."
     result = await asyncio.to_thread(ai_generate, prompt)
     if result:
         await bot.send_message(
@@ -119,11 +119,9 @@ async def handle_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts   = query.data.split("_")
     if len(parts) < 3:
         return
-    match   = parts[1]
-    choice  = parts[2]
+    match, choice = parts[1], parts[2]
     user_id = query.from_user.id
-    existing = await votes_col.find_one({"match": match, "user_id": user_id})
-    if existing:
+    if await votes_col.find_one({"match": match, "user_id": user_id}):
         await query.answer("Bạn đã vote rồi! 😅", show_alert=True)
         return
     await votes_col.insert_one({
@@ -135,11 +133,11 @@ async def handle_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚽ Chào mừng đến với *Bóng Đá 24H Việt Nam*!\n\n"
+        "⚽ Chào mừng đến *Bóng Đá 24H Việt Nam*!\n\n"
         "/lichthidau — Lịch thi đấu hôm nay\n"
         "/ketqua — Kết quả mới nhất\n"
         "/bangxephang — Bảng xếp hạng\n"
-        "/phanhtich — Phân tích trận đấu",
+        "/phanhtich [đội1] [đội2] — Phân tích trận",
         parse_mode="Markdown"
     )
 
@@ -150,7 +148,7 @@ async def lich_thi_dau(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ket_qua(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Đang lấy kết quả...")
-    result = await asyncio.to_thread(ai_generate, "Kết quả bóng đá mới nhất hôm nay các giải lớn, tỷ số, emoji đẹp.")
+    result = await asyncio.to_thread(ai_generate, "Kết quả bóng đá hôm nay các giải lớn, tỷ số, emoji đẹp.")
     await update.message.reply_text(result or "❌ Thử lại sau!")
 
 async def bang_xep_hang(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -162,9 +160,9 @@ async def phan_tich(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Dùng: /phanhtich MU Chelsea")
         return
-    teams  = " ".join(context.args)
+    teams = " ".join(context.args)
     await update.message.reply_text(f"⏳ Đang phân tích {teams}...")
-    result = await asyncio.to_thread(ai_generate, f"Phân tích trận {teams}: lịch sử đối đầu, phong độ, dự đoán. Emoji đẹp.")
+    result = await asyncio.to_thread(ai_generate, f"Phân tích trận {teams}: lịch sử, phong độ, dự đoán, emoji đẹp.")
     await update.message.reply_text(result or "❌ Thử lại sau!")
 
 async def dang_tin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -211,17 +209,14 @@ async def ket_qua_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     vd = await votes_col.count_documents({"match": match, "choice": "draw"})
     v2 = await votes_col.count_documents({"match": match, "choice": "2"})
     await update.message.reply_text(
-        f"📊 Kết quả vote {match}:\n\n"
-        f"🏆 Đội 1: {v1}\n🤝 Hòa: {vd}\n🏆 Đội 2: {v2}\n"
-        f"Tổng: {v1+vd+v2} người"
+        f"📊 Vote {match}:\n🏆 Đội 1: {v1}\n🤝 Hòa: {vd}\n🏆 Đội 2: {v2}\nTổng: {v1+vd+v2}"
     )
 
 def run_scheduler():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-
-    async def _scheduler():
-        await asyncio.sleep(15)
+    async def _run():
+        await asyncio.sleep(20)
         bot = Bot(token=TOKEN)
         while True:
             try:
@@ -231,10 +226,9 @@ def run_scheduler():
                     await post_daily_schedule(bot)
                 await asyncio.sleep(3600)
             except Exception as e:
-                logging.error(f"Scheduler error: {e}")
+                logging.error(f"Scheduler lỗi: {e}")
                 await asyncio.sleep(60)
-
-    loop.run_until_complete(_scheduler())
+    loop.run_until_complete(_run())
 
 def force_delete_webhook():
     for _ in range(5):
@@ -265,7 +259,7 @@ def run_bot():
             app.add_handler(CommandHandler("vote", tao_vote))
             app.add_handler(CommandHandler("ketquavote", ket_qua_vote))
             app.add_handler(CallbackQueryHandler(handle_vote, pattern="^vote_"))
-            logging.info("✅ Bot Bóng Đá 24H started!")
+            logging.info("✅ Bot started!")
             app.run_polling(drop_pending_updates=True)
         except Exception as e:
             logging.error(f"Bot crashed: {e} — restarting in 10s...")

@@ -1,4 +1,4 @@
-# Bot Bóng Đá 24H v3.0 - Groq AI + Best Practices 2026
+# Bot Bóng Đá 24H v3.1 - Fixed all errors
 import os
 import asyncio
 import logging
@@ -16,7 +16,7 @@ from telegram.ext import (
 from motor.motor_asyncio import AsyncIOMotorClient
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 
@@ -66,8 +66,7 @@ async def rewrite_with_ai(title, summary):
         f"Viết lại tin bóng đá bằng tiếng Việt, hấp dẫn, có emoji, "
         f"KHÔNG copy nguyên văn, tối đa 150 từ.\n"
         f"Tiêu đề: {title}\nNội dung: {summary}\n"
-        f"Chỉ trả về nội dung, không giải thích gì thêm.\n"
-        f"Kết thúc bằng: #BongDa24H"
+        f"Chỉ trả về nội dung, không giải thích.\n#BongDa24H"
     )
     result = await asyncio.to_thread(ai_generate, prompt)
     return result or f"⚽ {title}\n\n{summary[:300]}\n\n#BongDa24H"
@@ -110,8 +109,7 @@ async def fetch_and_post_news(bot):
 
 async def post_daily_schedule(bot):
     result = await asyncio.to_thread(ai_generate,
-        "Tạo lịch thi đấu bóng đá hôm nay các giải lớn Premier League, La Liga, "
-        "Champions League, V-League. Giờ Việt Nam, emoji đẹp, tối đa 20 trận.")
+        "Tạo lịch thi đấu bóng đá hôm nay các giải lớn, giờ VN, emoji đẹp.")
     if result:
         await bot.send_message(
             chat_id=CHANNEL_ID,
@@ -139,9 +137,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚽ Chào mừng đến Bóng Đá 24H Việt Nam!\n\n"
         "🔥 Tin tức AI viết lại mỗi giờ\n"
-        "📅 Lịch thi đấu tự động lúc 8h sáng\n"
+        "📅 Lịch thi đấu tự động lúc 8h\n"
         "🗳 Vote dự đoán tỷ số\n\n"
-        "Lệnh:\n"
         "/lichthidau - Lịch thi đấu hôm nay\n"
         "/ketqua - Kết quả mới nhất\n"
         "/bangxephang - Bảng xếp hạng\n"
@@ -151,7 +148,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def lich_thi_dau(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Đang lấy lịch...")
     result = await asyncio.to_thread(ai_generate,
-        "Lịch thi đấu bóng đá hôm nay các giải lớn, giờ Việt Nam, emoji đẹp.")
+        "Lịch thi đấu bóng đá hôm nay các giải lớn, giờ VN, emoji đẹp.")
     await update.message.reply_text(result or "❌ Thử lại sau!")
 
 async def ket_qua(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,8 +170,7 @@ async def phan_tich(update: Update, context: ContextTypes.DEFAULT_TYPE):
     teams = " ".join(context.args)
     await update.message.reply_text(f"⏳ Đang phân tích {teams}...")
     result = await asyncio.to_thread(ai_generate,
-        f"Phân tích chi tiết trận {teams}: lịch sử đối đầu gần đây, "
-        f"phong độ hiện tại, đội hình dự kiến, dự đoán tỷ số. Emoji đẹp.")
+        f"Phân tích trận {teams}: lịch sử đối đầu, phong độ, dự đoán tỷ số. Emoji đẹp.")
     await update.message.reply_text(result or "❌ Thử lại sau!")
 
 async def dang_tin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,23 +219,16 @@ async def ket_qua_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Vote {match}:\n🏆 Đội 1: {v1}\n🤝 Hòa: {vd}\n🏆 Đội 2: {v2}\nTổng: {v1+vd+v2}"
     )
 
-def run_scheduler():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    async def _run():
-        await asyncio.sleep(20)
-        bot = Bot(token=TOKEN)
-        while True:
-            try:
-                now = datetime.now()
-                await fetch_and_post_news(bot)
-                if now.hour == 8 and now.minute < 5:
-                    await post_daily_schedule(bot)
-                await asyncio.sleep(3600)
-            except Exception as e:
-                logging.error(f"Scheduler lỗi: {e}")
-                await asyncio.sleep(60)
-    loop.run_until_complete(_run())
+async def scheduler(context: ContextTypes.DEFAULT_TYPE):
+    bot = context.bot
+    try:
+        now = datetime.now()
+        await fetch_and_post_news(bot)
+        if now.hour == 8 and now.minute < 35:
+            await post_daily_schedule(bot)
+        logging.info("✅ Scheduler chạy xong!")
+    except Exception as e:
+        logging.error(f"Scheduler lỗi: {e}")
 
 def force_delete_webhook():
     for _ in range(5):
@@ -249,37 +238,34 @@ def force_delete_webhook():
                 timeout=10
             )
             if r.json().get("ok"):
+                logging.info("✅ Webhook deleted!")
                 time.sleep(3)
                 return
-        except:
-            pass
-        time.sleep(2)
-
-def run_bot():
-    while True:
-        try:
-            force_delete_webhook()
-            app = Application.builder().token(TOKEN).build()
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("lichthidau", lich_thi_dau))
-            app.add_handler(CommandHandler("ketqua", ket_qua))
-            app.add_handler(CommandHandler("bangxephang", bang_xep_hang))
-            app.add_handler(CommandHandler("phanhtich", phan_tich))
-            app.add_handler(CommandHandler("dangtin", dang_tin))
-            app.add_handler(CommandHandler("danglich", dang_lich))
-            app.add_handler(CommandHandler("vote", tao_vote))
-            app.add_handler(CommandHandler("ketquavote", ket_qua_vote))
-            app.add_handler(CallbackQueryHandler(handle_vote, pattern="^vote_"))
-            logging.info("✅ Bot Bóng Đá 24H v3.0 started!")
-            app.run_polling(drop_pending_updates=True)
         except Exception as e:
-            logging.error(f"Bot crashed: {e} — restarting in 10s...")
-            time.sleep(10)
+            logging.error(f"Webhook error: {e}")
+        time.sleep(2)
 
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
-    threading.Thread(target=run_scheduler, daemon=True).start()
-    run_bot()
+    force_delete_webhook()
+
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("lichthidau", lich_thi_dau))
+    app.add_handler(CommandHandler("ketqua", ket_qua))
+    app.add_handler(CommandHandler("bangxephang", bang_xep_hang))
+    app.add_handler(CommandHandler("phanhtich", phan_tich))
+    app.add_handler(CommandHandler("dangtin", dang_tin))
+    app.add_handler(CommandHandler("danglich", dang_lich))
+    app.add_handler(CommandHandler("vote", tao_vote))
+    app.add_handler(CommandHandler("ketquavote", ket_qua_vote))
+    app.add_handler(CallbackQueryHandler(handle_vote, pattern="^vote_"))
+
+    # Scheduler dùng JobQueue của PTB - an toàn nhất
+    app.job_queue.run_repeating(scheduler, interval=3600, first=20)
+
+    logging.info("✅ Bot Bóng Đá 24H v3.1 started!")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,4 @@
-# Bot Bóng Đá 24H v2.0 - Fix Gemini API mới
+# Bot Bóng Đá 24H v2.1 - Fix scheduler + post_init
 import os
 import asyncio
 import logging
@@ -8,37 +8,25 @@ import requests
 import feedparser
 from datetime import datetime
 from flask import Flask
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Bot
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes
+    filters, ContextTypes
 )
 from google import genai
 from motor.motor_asyncio import AsyncIOMotorClient
 
 logging.basicConfig(level=logging.INFO)
 
-TOKEN       = os.environ.get("TOKEN", "")
-ADMIN_ID    = int(os.environ.get("ADMIN_ID", "0"))
-CHANNEL_ID  = int(os.environ.get("CHANNEL_ID", "-1003721755956"))
-GROUP_ID    = int(os.environ.get("GROUP_ID", "-1003772590166"))
-GEMINI_KEY  = os.environ.get("GEMINI_KEY", "")
-MONGO_URI   = os.environ.get("MONGO_URI", "")
-PORT        = int(os.environ.get("PORT", 8080))
+TOKEN      = os.environ.get("TOKEN", "")
+ADMIN_ID   = int(os.environ.get("ADMIN_ID", "0"))
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003721755956"))
+GROUP_ID   = int(os.environ.get("GROUP_ID", "-1003772590166"))
+GEMINI_KEY = os.environ.get("GEMINI_KEY", "")
+MONGO_URI  = os.environ.get("MONGO_URI", "")
+PORT       = int(os.environ.get("PORT", 8080))
 
-client_ai = genai.Client(api_key=GEMINI_KEY)
-
-def ai_generate(prompt):
-    try:
-        response = client_ai.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        logging.error(f"AI error: {e}")
-        return None
-
+client_ai    = genai.Client(api_key=GEMINI_KEY)
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db           = mongo_client["bongdabot"]
 news_col     = db["posted_news"]
@@ -59,14 +47,25 @@ RSS_FEEDS = [
     "https://thanhnien.vn/rss/the-thao.rss",
 ]
 
+def ai_generate(prompt):
+    try:
+        response = client_ai.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        return response.text
+    except Exception as e:
+        logging.error(f"AI error: {e}")
+        return None
+
 async def rewrite_with_ai(title, summary):
     prompt = f"""Viết lại tin bóng đá sau theo phong cách hấp dẫn, ngắn gọn bằng tiếng Việt.
 Thêm emoji phù hợp. KHÔNG copy nguyên văn. Tối đa 200 từ.
 Tiêu đề gốc: {title}
 Nội dung gốc: {summary}
-Trả về định dạng:
+Định dạng:
 **[TIÊU ĐỀ HAY]**
-[NỘI DUNG VIẾT LẠI]
+[NỘI DUNG]
 #BongDa24H #BóngĐá"""
     result = await asyncio.to_thread(ai_generate, prompt)
     return result or f"⚽ {title}\n\n{summary}\n\n#BongDa24H"
@@ -106,18 +105,18 @@ async def fetch_and_post_news(bot):
     return posted
 
 async def post_daily_schedule(bot):
-    prompt = "Tạo lịch thi đấu bóng đá hôm nay các giải lớn, giờ Việt Nam, format đẹp với emoji."
+    prompt = "Tạo lịch thi đấu bóng đá hôm nay các giải lớn, giờ VN, format đẹp với emoji."
     result = await asyncio.to_thread(ai_generate, prompt)
     if result:
         await bot.send_message(
             chat_id=CHANNEL_ID,
-            text=f"📅 **LỊCH THI ĐẤU HÔM NAY**\n\n{result}\n\n#LịchThiĐấu",
+            text=f"📅 *LỊCH THI ĐẤU HÔM NAY*\n\n{result}\n\n#LịchThiĐấu",
             parse_mode="Markdown"
         )
 
 async def handle_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    parts = query.data.split("_")
+    query   = update.callback_query
+    parts   = query.data.split("_")
     if len(parts) < 3:
         return
     match   = parts[1]
@@ -163,9 +162,9 @@ async def phan_tich(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Dùng: /phanhtich MU Chelsea")
         return
-    teams = " ".join(context.args)
+    teams  = " ".join(context.args)
     await update.message.reply_text(f"⏳ Đang phân tích {teams}...")
-    result = await asyncio.to_thread(ai_generate, f"Phân tích trận {teams}: lịch sử đối đầu, phong độ, dự đoán kết quả. Emoji đẹp.")
+    result = await asyncio.to_thread(ai_generate, f"Phân tích trận {teams}: lịch sử đối đầu, phong độ, dự đoán. Emoji đẹp.")
     await update.message.reply_text(result or "❌ Thử lại sau!")
 
 async def dang_tin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -217,25 +216,33 @@ async def ket_qua_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Tổng: {v1+vd+v2} người"
     )
 
-async def scheduler(bot):
-    while True:
-        try:
-            now = datetime.now()
-            await fetch_and_post_news(bot)
-            if now.hour == 8 and now.minute < 5:
-                await post_daily_schedule(bot)
-            await asyncio.sleep(3600)
-        except Exception as e:
-            logging.error(f"Scheduler error: {e}")
-            await asyncio.sleep(60)
+def run_scheduler():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-async def post_init(app):
-    asyncio.create_task(scheduler(app.bot))
+    async def _scheduler():
+        await asyncio.sleep(15)
+        bot = Bot(token=TOKEN)
+        while True:
+            try:
+                now = datetime.now()
+                await fetch_and_post_news(bot)
+                if now.hour == 8 and now.minute < 5:
+                    await post_daily_schedule(bot)
+                await asyncio.sleep(3600)
+            except Exception as e:
+                logging.error(f"Scheduler error: {e}")
+                await asyncio.sleep(60)
+
+    loop.run_until_complete(_scheduler())
 
 def force_delete_webhook():
     for _ in range(5):
         try:
-            r = requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=10)
+            r = requests.get(
+                f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true",
+                timeout=10
+            )
             if r.json().get("ok"):
                 time.sleep(3)
                 return
@@ -247,7 +254,7 @@ def run_bot():
     while True:
         try:
             force_delete_webhook()
-            app = Application.builder().token(TOKEN).post_init(post_init).build()
+            app = Application.builder().token(TOKEN).build()
             app.add_handler(CommandHandler("start", start))
             app.add_handler(CommandHandler("lichthidau", lich_thi_dau))
             app.add_handler(CommandHandler("ketqua", ket_qua))
@@ -258,6 +265,7 @@ def run_bot():
             app.add_handler(CommandHandler("vote", tao_vote))
             app.add_handler(CommandHandler("ketquavote", ket_qua_vote))
             app.add_handler(CallbackQueryHandler(handle_vote, pattern="^vote_"))
+            logging.info("✅ Bot Bóng Đá 24H started!")
             app.run_polling(drop_pending_updates=True)
         except Exception as e:
             logging.error(f"Bot crashed: {e} — restarting in 10s...")
@@ -265,6 +273,7 @@ def run_bot():
 
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=run_scheduler, daemon=True).start()
     run_bot()
 
 if __name__ == "__main__":

@@ -8,48 +8,41 @@ CHANNEL_ID = os.getenv("CHANNEL_ID")
 FOOTBALL_KEY = os.getenv("FOOTBALL_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# ===== START COMMAND =====
+# ===== START =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚽ Bot LIVE đang chạy!\nChờ trận để cập nhật...")
+    await update.message.reply_text("⚽ Bot LIVE đang chạy!")
 
-# ===== GET LIVE MATCH =====
-def get_live_match():
+# ===== GET MATCH =====
+def get_live():
     url = "https://v3.football.api-sports.io/fixtures?live=all"
     headers = {"x-apisports-key": FOOTBALL_KEY}
     res = requests.get(url, headers=headers).json()
 
-    if "response" not in res or len(res["response"]) == 0:
+    if not res.get("response"):
         return None
 
-    match = res["response"][0]
+    m = res["response"][0]
 
-    home = match["teams"]["home"]["name"]
-    away = match["teams"]["away"]["name"]
-    goals_home = match["goals"]["home"]
-    goals_away = match["goals"]["away"]
-    minute = match["fixture"]["status"]["elapsed"]
+    home = m["teams"]["home"]["name"]
+    away = m["teams"]["away"]["name"]
+    gh = m["goals"]["home"]
+    ga = m["goals"]["away"]
+    minute = m["fixture"]["status"]["elapsed"]
 
-    return f"⚽ {home} {goals_home}-{goals_away} {away}\n⏱ {minute}'"
+    return f"⚽ {home} {gh}-{ga} {away}\n⏱ {minute}'"
 
-# ===== SEND MATCH =====
+# ===== SEND =====
 async def send_live(context: ContextTypes.DEFAULT_TYPE):
-    text = get_live_match()
-
+    text = get_live()
     if not text:
         return
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🔥 Xem ngay", url="https://yourlink.com")
-        ]
-    ]
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = [[InlineKeyboardButton("🔥 Xem ngay", url="https://yourlink.com")]]
 
     await context.bot.send_message(
         chat_id=CHANNEL_ID,
         text=text,
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 # ===== MAIN =====
@@ -58,10 +51,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
 
-    # chạy mỗi 60s
+    # JOB chạy mỗi 60s
     app.job_queue.run_repeating(send_live, interval=60, first=10)
 
-    # webhook (KHÔNG polling)
     app.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 10000)),

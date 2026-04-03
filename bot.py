@@ -1,134 +1,103 @@
 import os
-import asyncio
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from flask import Flask, request
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
 
-# ===== CONFIG =====
-TOKEN = os.getenv("BOT_TOKEN")
+# ====== ENV ======
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 FOOTBALL_KEY = os.getenv("FOOTBALL_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-live_matches = {}
+# ====== APP ======
+flask_app = Flask(__name__)
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# ===== LẤY TRẬN LIVE =====
-def get_live_matches():
-    url = "https://v3.football.api-sports.io/fixtures"
+# ====== COMMAND ======
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚽ Bot bóng đá LIVE đang chạy!")
+
+# ====== GET MATCH ======
+def get_live_match():
+    url = "https://v3.football.api-sports.io/fixtures?live=all"
     headers = {"x-apisports-key": FOOTBALL_KEY}
-    params = {"live": "all"}
+    res = requests.get(url, headers=headers).json()
 
-    r = requests.get(url, headers=headers, params=params)
-    return r.json().get("response", [])
+    try:
+        match = res["response"][0]
+        home = match["teams"]["home"]["name"]
+        away = match["teams"]["away"]["name"]
+        score_home = match["goals"]["home"]
+        score_away = match["goals"]["away"]
+        minute = match["fixture"]["status"]["elapsed"]
 
-# ===== GỬI TRẬN =====
-async def send_real_match(context: ContextTypes.DEFAULT_TYPE):
-    matches = await asyncio.to_thread(get_live_matches)
+        return home, away, score_home, score_away, minute
+    except:
+        return None
 
-    if not matches:
-        await context.bot.send_message(chat_id=CHANNEL_ID, text="Không có trận live")
+# ====== SEND LIVE ======
+async def send_live(context: ContextTypes.DEFAULT_TYPE):
+    match = get_live_match()
+    if not match:
         return
 
-    m = matches[0]
+    home, away, sh, sa, minute = match
 
-    fixture_id = m["fixture"]["id"]
-    home = m["teams"]["home"]["name"]
-    away = m["teams"]["away"]["name"]
+    text = f"""🔥 LIVE MATCH
 
-    score_home = m["goals"]["home"] or 0
-    score_away = m["goals"]["away"] or 0
-    minute = m["fixture"]["status"]["elapsed"] or 0
+{home} {sh} - {sa} {away}
+⏱ {minute}'
 
-    text = f"""
-LIVE • {minute}'
+👉 Ai thắng?"""
 
-{home}  {score_home} — {score_away}  {away}
+    keyboard = [
+        [
+            InlineKeyboardButton(home, callback_data="home"),
+            InlineKeyboardButton("Hòa", callback_data="draw"),
+            InlineKeyboardButton(away, callback_data="away"),
+        ]
+    ]
 
-Đang cập nhật...
-"""
-
-    msg = await context.bot.send_message(chat_id=CHANNEL_ID, text=text.strip())
-
-    live_matches[fixture_id] = {
-        "message_id": msg.message_id,
-        "last_goals": (score_home, score_away)
-    }
-
-    asyncio.create_task(track_match(context, fixture_id))
-
-# ===== THEO DÕI TRẬN =====
-async def track_match(context, fixture_id):
-    while True:
-        await asyncio.sleep(20)
-
-        url = "https://v3.football.api-sports.io/fixtures"
-        headers = {"x-apisports-key": FOOTBALL_KEY}
-        params = {"id": fixture_id}
-
-        r = requests.get(url, headers=headers, params=params)
-        data = r.json()["response"][0]
-
-        home = data["teams"]["home"]["name"]
-        away = data["teams"]["away"]["name"]
-
-        score_home = data["goals"]["home"] or 0
-        score_away = data["goals"]["away"] or 0
-
-        old_home, old_away = live_matches[fixture_id]["last_goals"]
-
-        if score_home != old_home or score_away != old_away:
-            await update_real_match(context, fixture_id, data)
-            live_matches[fixture_id]["last_goals"] = (score_home, score_away)
-
-# ===== UPDATE =====
-async def update_real_match(context, fixture_id, data):
-    home = data["teams"]["home"]["name"]
-    away = data["teams"]["away"]["name"]
-
-    score_home = data["goals"]["home"] or 0
-    score_away = data["goals"]["away"] or 0
-    minute = data["fixture"]["status"]["elapsed"] or 0
-
-    events = data["events"]
-
-    goals = []
-    for e in events:
-        if e["type"] == "Goal":
-            player = e["player"]["name"]
-            minute_goal = e["time"]["elapsed"]
-            goals.append(f"{minute_goal}' {player}")
-
-    goals_text = "\n".join(goals) if goals else "Chưa có bàn"
-
-    text = f"""
-LIVE • {minute}'
-
-{home}  {score_home} — {score_away}  {away}
-
-BÀN THẮNG
-{goals_text}
-"""
-
-    await context.bot.edit_message_text(
+    await context.bot.send_message(
         chat_id=CHANNEL_ID,
-        message_id=live_matches[fixture_id]["message_id"],
-        text=text.strip()
+        text=text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-# ===== COMMAND =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot đang chạy!")
+# ====== SET JOB ======
+async def on_start(app):
+    app.job_queue.run_repeating(send_live, interval=60, first=10)
 
-# ===== MAIN =====
-async def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+app.post_init = on_start
 
-    app.add_handler(CommandHandler("start", start))
+# ====== HANDLER ======
+app.add_handler(CommandHandler("start", start))
 
-    # auto chạy sau 10s
-    app.job_queue.run_once(send_real_match, 10)
+# ====== WEBHOOK ======
+@flask_app.route("/", methods=["GET"])
+def home():
+    return "Bot đang chạy!"
 
-    print("Bot đang chạy...")
-    await app.run_polling()
+@flask_app.route("/webhook", methods=["POST"])
+async def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, app.bot)
+    await app.process_update(update)
+    return "ok"
 
+# ====== MAIN ======
 if __name__ == "__main__":
+    import asyncio
+
+    async def main():
+        await app.initialize()
+        await app.bot.set_webhook(WEBHOOK_URL + "/webhook")
+
     asyncio.run(main())
+
+    flask_app.run(host="0.0.0.0", port=10000)

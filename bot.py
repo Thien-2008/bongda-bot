@@ -1,4 +1,4 @@
-# Bot Bóng Đá 24H v4.1 - Final Fix
+# Bot Bóng Đá 24H v5.0 - Webhook mode (no Conflict forever)
 import os
 import asyncio
 import logging
@@ -7,7 +7,7 @@ import time
 import requests
 import feedparser
 from datetime import datetime
-from flask import Flask
+from flask import Flask, request as flask_request
 from groq import Groq
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -27,6 +27,7 @@ GROQ_KEY     = os.environ.get("GROQ_KEY", "")
 FOOTBALL_KEY = os.environ.get("FOOTBALL_KEY", "")
 MONGO_URI    = os.environ.get("MONGO_URI", "")
 PORT         = int(os.environ.get("PORT", 8080))
+WEBHOOK_URL  = "https://bongda-bot.onrender.com"
 
 groq_client  = Groq(api_key=GROQ_KEY)
 mongo_client = AsyncIOMotorClient(MONGO_URI)
@@ -34,14 +35,23 @@ db           = mongo_client["bongdabot"]
 news_col     = db["posted_news"]
 votes_col    = db["votes"]
 
-flask_app = Flask(__name__)
+flask_app   = Flask(__name__)
+application = None
+bot_loop    = None
 
 @flask_app.route("/")
 def index():
-    return "OK", 200
+    return "Bot Bóng Đá 24H đang chạy!", 200
 
-def run_flask():
-    flask_app.run(host="0.0.0.0", port=PORT)
+@flask_app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    if application and bot_loop:
+        data   = flask_request.get_json(force=True)
+        update = Update.de_json(data, application.bot)
+        asyncio.run_coroutine_threadsafe(
+            application.process_update(update), bot_loop
+        )
+    return "OK", 200
 
 RSS_FEEDS = [
     "https://vnexpress.net/rss/the-thao/bong-da.rss",
@@ -49,7 +59,7 @@ RSS_FEEDS = [
 ]
 
 FOOTBALL_HEADERS = {"x-apisports-key": FOOTBALL_KEY}
-FOOTBALL_URL = "https://v3.football.api-sports.io"
+FOOTBALL_URL     = "https://v3.football.api-sports.io"
 
 def get_today_fixtures():
     try:
@@ -60,18 +70,17 @@ def get_today_fixtures():
             timeout=10)
         return r.json().get("response", [])
     except Exception as e:
-        logging.error(f"API fixtures lỗi: {e}")
+        logging.error(f"Fixtures lỗi: {e}")
         return []
 
 def get_live_scores():
     try:
         r = requests.get(f"{FOOTBALL_URL}/fixtures",
             headers=FOOTBALL_HEADERS,
-            params={"live": "all"},
-            timeout=10)
+            params={"live": "all"}, timeout=10)
         return r.json().get("response", [])
     except Exception as e:
-        logging.error(f"API live lỗi: {e}")
+        logging.error(f"Live lỗi: {e}")
         return []
 
 def get_standings(league_id, season=2024):
@@ -85,13 +94,13 @@ def get_standings(league_id, season=2024):
             return data[0]["league"]["standings"][0]
         return []
     except Exception as e:
-        logging.error(f"API standings lỗi: {e}")
+        logging.error(f"Standings lỗi: {e}")
         return []
 
 def format_fixtures(fixtures):
     if not fixtures:
         return "📅 Hôm nay không có trận đấu lớn!"
-    text = ""
+    text    = ""
     leagues = {}
     for f in fixtures[:20]:
         league = f["league"]["name"]
@@ -101,13 +110,13 @@ def format_fixtures(fixtures):
     for league, matches in leagues.items():
         text += f"\n🏆 {league}\n"
         for m in matches:
-            home = m["teams"]["home"]["name"]
-            away = m["teams"]["away"]["name"]
-            time_str = m["fixture"]["date"][11:16]
+            home   = m["teams"]["home"]["name"]
+            away   = m["teams"]["away"]["name"]
+            t      = m["fixture"]["date"][11:16]
             status = m["fixture"]["status"]["short"]
             if status == "NS":
-                text += f"⏰ {time_str} | {home} vs {away}\n"
-            elif status in ["1H", "2H", "HT", "ET", "P"]:
+                text += f"⏰ {t} | {home} vs {away}\n"
+            elif status in ["1H","2H","HT","ET","P"]:
                 gh = m["goals"]["home"] or 0
                 ga = m["goals"]["away"] or 0
                 text += f"🔴 LIVE | {home} {gh}-{ga} {away}\n"
@@ -115,28 +124,28 @@ def format_fixtures(fixtures):
                 gh = m["goals"]["home"] or 0
                 ga = m["goals"]["away"] or 0
                 text += f"✅ KT | {home} {gh}-{ga} {away}\n"
-    return text or "📅 Không có trận đấu!"
+    return text or "📅 Không có trận!"
 
 def format_standings(standings, title):
     if not standings:
         return f"❌ Không lấy được BXH {title}"
-    text = f"🏆 {title}\n\n"
-    medals = ["🥇", "🥈", "🥉"]
+    text   = f"🏆 {title}\n\n"
+    medals = ["🥇","🥈","🥉"]
     for i, team in enumerate(standings[:10]):
-        rank = team["rank"]
-        name = team["team"]["name"]
-        pts  = team["points"]
+        rank   = team["rank"]
+        name   = team["team"]["name"]
+        pts    = team["points"]
         played = team["all"]["played"]
-        gd = team["goalsDiff"]
-        medal = medals[i] if i < 3 else f"{rank}."
-        text += f"{medal} {name} | {pts}đ | {played}trận | GD:{gd:+}\n"
+        gd     = team["goalsDiff"]
+        medal  = medals[i] if i < 3 else f"{rank}."
+        text  += f"{medal} {name} | {pts}đ | {played}trận | GD:{gd:+}\n"
     return text
 
 def ai_generate(prompt):
     try:
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role":"user","content":prompt}],
             max_tokens=400, temperature=0.7
         )
         return r.choices[0].message.content
@@ -159,9 +168,9 @@ async def fetch_and_post_news(bot):
             feed = feedparser.parse(url)
             for entry in feed.entries[:3]:
                 try:
-                    title   = entry.get("title", "").strip()
-                    summary = entry.get("summary", entry.get("description", ""))[:400]
-                    link    = entry.get("link", "").strip()
+                    title   = entry.get("title","").strip()
+                    summary = entry.get("summary", entry.get("description",""))[:400]
+                    link    = entry.get("link","").strip()
                     if not title or not link:
                         continue
                     if await news_col.find_one({"link": link}):
@@ -171,7 +180,7 @@ async def fetch_and_post_news(bot):
                         InlineKeyboardButton("🔗 Đọc thêm", url=link)
                     ]])
                     await bot.send_message(chat_id=CHANNEL_ID, text=content, reply_markup=kb)
-                    await news_col.insert_one({"link": link, "title": title, "posted_at": datetime.now()})
+                    await news_col.insert_one({"link":link,"title":title,"posted_at":datetime.now()})
                     posted += 1
                     await asyncio.sleep(5)
                 except Exception as e:
@@ -179,13 +188,6 @@ async def fetch_and_post_news(bot):
         except Exception as e:
             logging.error(f"RSS lỗi: {e}")
     return posted
-
-async def error_handler(update, context):
-    error = str(context.error)
-    logging.error(f"Lỗi bot: {error}")
-    if "Conflict" in error:
-        logging.info("Conflict - chờ 15s rồi tiếp tục...")
-        await asyncio.sleep(15)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -195,7 +197,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📊 BXH real-time\n"
         "🗳 Vote dự đoán tỷ số\n\n"
         "/lichthidau - Lịch thi đấu hôm nay\n"
-        "/ketqua - Kết quả live & hôm nay\n"
+        "/ketqua - Kết quả live\n"
         "/bxh_anh - BXH Premier League\n"
         "/bxh_tbn - BXH La Liga\n"
         "/phanhtich [đội1] [đội2] - Phân tích AI"
@@ -214,7 +216,7 @@ async def ket_qua(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = format_fixtures(live)
         await update.message.reply_text(f"🔴 ĐANG DIỄN RA\n{text}\n#LiveScore")
     else:
-        all_f = await asyncio.to_thread(get_today_fixtures)
+        all_f    = await asyncio.to_thread(get_today_fixtures)
         finished = [f for f in all_f if f["fixture"]["status"]["short"] == "FT"]
         if finished:
             text = format_fixtures(finished)
@@ -239,8 +241,7 @@ async def phan_tich(update: Update, context: ContextTypes.DEFAULT_TYPE):
     teams = " ".join(context.args)
     await update.message.reply_text(f"⏳ AI phân tích {teams}...")
     result = await asyncio.to_thread(ai_generate,
-        f"Phân tích trận {teams}: phong độ gần đây, lịch sử đối đầu, "
-        f"dự đoán tỷ số. Tiếng Việt, emoji, chuyên nghiệp.")
+        f"Phân tích trận {teams}: phong độ, lịch sử, dự đoán tỷ số. Tiếng Việt, emoji.")
     await update.message.reply_text(result or "❌ Thử lại sau!")
 
 async def handle_vote(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -311,42 +312,43 @@ async def scheduler(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Scheduler lỗi: {e}")
 
+async def run_bot():
+    global application, bot_loop
+    bot_loop    = asyncio.get_event_loop()
+    application = Application.builder().token(TOKEN).updater(None).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("lichthidau", lich_thi_dau))
+    application.add_handler(CommandHandler("ketqua", ket_qua))
+    application.add_handler(CommandHandler("bxh_anh", bxh_anh))
+    application.add_handler(CommandHandler("bxh_tbn", bxh_tbn))
+    application.add_handler(CommandHandler("phanhtich", phan_tich))
+    application.add_handler(CommandHandler("dangtin", dang_tin))
+    application.add_handler(CommandHandler("vote", tao_vote))
+    application.add_handler(CommandHandler("ketquavote", ket_qua_vote))
+    application.add_handler(CallbackQueryHandler(handle_vote, pattern="^vote_"))
+    application.job_queue.run_repeating(scheduler, interval=3600, first=30)
+
+    await application.initialize()
+    await application.bot.set_webhook(
+        url=f"{WEBHOOK_URL}/{TOKEN}",
+        drop_pending_updates=True
+    )
+    await application.start()
+    logging.info("✅ Bot v5.0 Webhook started - No more Conflict!")
+
+    while True:
+        await asyncio.sleep(3600)
+
+def start_bot():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_bot())
+
 def main():
-    # Xóa webhook + chờ 10s để instance cũ chết
-    try:
-        requests.get(
-            f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true",
-            timeout=10
-        )
-        logging.info("Webhook deleted, waiting 10s...")
-        time.sleep(10)
-    except:
-        pass
-
-    threading.Thread(target=run_flask, daemon=True).start()
-
-    app = Application.builder().token(TOKEN).build()
-
-    # Handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("lichthidau", lich_thi_dau))
-    app.add_handler(CommandHandler("ketqua", ket_qua))
-    app.add_handler(CommandHandler("bxh_anh", bxh_anh))
-    app.add_handler(CommandHandler("bxh_tbn", bxh_tbn))
-    app.add_handler(CommandHandler("phanhtich", phan_tich))
-    app.add_handler(CommandHandler("dangtin", dang_tin))
-    app.add_handler(CommandHandler("vote", tao_vote))
-    app.add_handler(CommandHandler("ketquavote", ket_qua_vote))
-    app.add_handler(CallbackQueryHandler(handle_vote, pattern="^vote_"))
-
-    # Error handler
-    app.add_error_handler(error_handler)
-
-    # Scheduler
-    app.job_queue.run_repeating(scheduler, interval=3600, first=20)
-
-    logging.info("✅ Bot Bóng Đá 24H v4.1 started!")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    threading.Thread(target=start_bot, daemon=True).start()
+    time.sleep(3)
+    flask_app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
     main()

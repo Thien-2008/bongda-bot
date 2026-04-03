@@ -111,12 +111,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & \~filters.COMMAND, handle_message))
     if WEBHOOK_URL:
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=int(os.getenv("PORT", 8443)),
-            url_path=TOKEN,
-            webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-        )
+        app.run_webhook(listen="0.0.0.0", port=int(os.getenv("PORT", 8443)), url_path=TOKEN, webhook_url=f"{WEBHOOK_URL}/{TOKEN}")
     else:
         app.run_polling()
 

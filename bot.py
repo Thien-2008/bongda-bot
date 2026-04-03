@@ -1,4 +1,4 @@
-# ================== BÓNG ĐÁ 24H BOT PRO v6 ==================
+# ⚽ BOT BÓNG ĐÁ 24H PRO v6 (AUTO + XỊN)
 import os
 import asyncio
 import logging
@@ -10,194 +10,195 @@ from datetime import datetime
 from flask import Flask, request as flask_request
 from groq import Groq
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 from motor.motor_asyncio import AsyncIOMotorClient
 
 logging.basicConfig(level=logging.INFO)
 
-# ===== ENV =====
-TOKEN        = os.environ.get("TOKEN")
+TOKEN        = os.environ.get("BOT_TOKEN")
 CHANNEL_ID   = os.environ.get("CHANNEL_ID")
 FOOTBALL_KEY = os.environ.get("FOOTBALL_KEY")
 GROQ_KEY     = os.environ.get("GROQ_KEY")
 MONGO_URI    = os.environ.get("MONGO_URI")
 PORT         = int(os.environ.get("PORT", 8080))
+
 WEBHOOK_URL  = "https://bongda-bot.onrender.com"
 
-# ===== SETUP =====
 groq_client  = Groq(api_key=GROQ_KEY)
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db           = mongo_client["bongda"]
-news_col     = db["news"]
-
-FOOTBALL_HEADERS = {"x-apisports-key": FOOTBALL_KEY}
-BASE_URL = "https://v3.football.api-sports.io"
+posted_col   = db["posted"]
 
 app = Flask(__name__)
 application = None
-bot_loop = None
+loop = None
 
-# ===== WEBHOOK =====
-@app.route("/")
-def home():
-    return "BOT RUNNING"
+# ================= API =================
+HEADERS = {"x-apisports-key": FOOTBALL_KEY}
+BASE    = "https://v3.football.api-sports.io"
 
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    if application:
-        data = flask_request.get_json(force=True)
-        update = Update.de_json(data, application.bot)
-        asyncio.run_coroutine_threadsafe(
-            application.process_update(update), bot_loop
-        )
-    return "OK"
-
-# ===== API =====
 def get_live():
-    r = requests.get(f"{BASE_URL}/fixtures",
-        headers=FOOTBALL_HEADERS,
-        params={"live":"all"})
-    return r.json()["response"]
+    r = requests.get(f"{BASE}/fixtures",
+        headers=HEADERS,
+        params={"live": "all"}, timeout=10)
+    return r.json().get("response", [])
 
-def get_today():
-    today = datetime.now().strftime("%Y-%m-%d")
-    r = requests.get(f"{BASE_URL}/fixtures",
-        headers=FOOTBALL_HEADERS,
-        params={"date":today})
-    return r.json()["response"]
+def get_events(fixture_id):
+    r = requests.get(f"{BASE}/fixtures/events",
+        headers=HEADERS,
+        params={"fixture": fixture_id}, timeout=10)
+    return r.json().get("response", [])
 
-def get_events(fid):
-    r = requests.get(f"{BASE_URL}/fixtures/events",
-        headers=FOOTBALL_HEADERS,
-        params={"fixture":fid})
-    return r.json()["response"]
+# ================= FORMAT =================
+def format_live(match):
+    home = match["teams"]["home"]["name"]
+    away = match["teams"]["away"]["name"]
+    gh   = match["goals"]["home"] or 0
+    ga   = match["goals"]["away"] or 0
+    time = match["fixture"]["status"]["elapsed"]
 
-# ===== FORMAT PRO =====
-def format_match(m):
-    home = m["teams"]["home"]["name"]
-    away = m["teams"]["away"]["name"]
-    gh = m["goals"]["home"] or 0
-    ga = m["goals"]["away"] or 0
-    status = m["fixture"]["status"]["short"]
+    text = f"""🔴 LIVE UPDATE
 
-    text = f"🔥 {home} {gh} - {ga} {away}\n"
+🔥 {home} {gh} - {ga} {away}
+⏱ {time}'
 
-    # goals
-    if status in ["1H","2H","HT","FT"]:
-        events = get_events(m["fixture"]["id"])
-        for e in events:
-            if e["type"] == "Goal":
-                minute = e["time"]["elapsed"]
-                player = e["player"]["name"]
-                assist = e["assist"]["name"] if e["assist"] else None
+"""
 
-                if assist:
-                    text += f"⚽ {minute}' {player} (KT: {assist})\n"
-                else:
-                    text += f"⚽ {minute}' {player}\n"
+    # lấy sự kiện ghi bàn
+    events = get_events(match["fixture"]["id"])
+    goals = []
 
-    if status == "NS":
-        t = m["fixture"]["date"][11:16]
-        text += f"⏰ {t}\n"
-    elif status in ["1H","2H"]:
-        text += "🔴 Đang diễn ra\n"
-    elif status == "FT":
-        text += "✅ Kết thúc\n"
+    for e in events:
+        if e["type"] == "Goal":
+            minute = e["time"]["elapsed"]
+            player = e["player"]["name"]
+            assist = e["assist"]["name"] if e["assist"] else None
+            detail = e["detail"]
+
+            g = f"⚽ {minute}' {player}"
+            if assist:
+                g += f" (🅰 {assist})"
+            if "Penalty" in detail:
+                g += " (P)"
+            goals.append(g)
+
+    if goals:
+        text += "\n".join(goals)
+
+    text += "\n\n#Live"
 
     return text
 
-# ===== AI =====
-def ai(prompt):
+# ================= AI =================
+def ai_rewrite(title, summary):
     try:
+        prompt = f"""
+Viết lại tin bóng đá cực cuốn, ngắn gọn, tiếng Việt, có emoji.
+Ưu tiên người Việt thích đọc.
+
+Tiêu đề: {title}
+Nội dung: {summary}
+
+Không dài quá 120 từ.
+"""
         r = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role":"user","content":prompt}],
-            max_tokens=300
+            messages=[{"role":"user","content":prompt}]
         )
         return r.choices[0].message.content
     except:
-        return None
+        return f"⚽ {title}\n\n{summary[:200]}"
 
-# ===== AUTO LIVE =====
-last_scores = {}
-
+# ================= AUTO =================
 async def auto_live(bot):
     matches = await asyncio.to_thread(get_live)
 
-    for m in matches:
-        fid = str(m["fixture"]["id"])
-        score = f"{m['goals']['home']}-{m['goals']['away']}"
+    for m in matches[:5]:  # limit free API
+        fid = m["fixture"]["id"]
 
-        if fid not in last_scores or last_scores[fid] != score:
-            last_scores[fid] = score
+        if await posted_col.find_one({"id": fid}):
+            continue
 
-            text = format_match(m)
+        text = await asyncio.to_thread(format_live, m)
 
-            await bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=f"🔴 LIVE UPDATE\n\n{text}\n#Live"
-            )
+        await bot.send_message(chat_id=CHANNEL_ID, text=text)
 
-# ===== AUTO NEWS =====
-RSS = [
-    "https://vnexpress.net/rss/the-thao.rss",
-]
+        await posted_col.insert_one({"id": fid})
 
 async def auto_news(bot):
-    for url in RSS:
+    feeds = [
+        "https://vnexpress.net/rss/the-thao/bong-da.rss",
+    ]
+
+    for url in feeds:
         feed = feedparser.parse(url)
 
         for e in feed.entries[:2]:
-            if await news_col.find_one({"link":e.link}):
+            link = e.link
+
+            if await posted_col.find_one({"link": link}):
                 continue
 
-            prompt = f"Viết lại tin bóng đá ngắn, hấp dẫn:\n{e.title}\n{e.summary}"
-            content = await asyncio.to_thread(ai, prompt)
+            content = await asyncio.to_thread(
+                ai_rewrite, e.title, e.summary
+            )
+
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📖 Xem chi tiết", url=link)
+            ]])
 
             await bot.send_message(
                 chat_id=CHANNEL_ID,
-                text=content or e.title
+                text=content,
+                reply_markup=kb
             )
 
-            await news_col.insert_one({"link":e.link})
+            await posted_col.insert_one({"link": link})
 
-# ===== COMMAND =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚽ Bot bóng đá PRO đang chạy!")
-
-# ===== SCHEDULER =====
+# ================= SCHEDULER =================
 async def scheduler(context: ContextTypes.DEFAULT_TYPE):
     await auto_live(context.bot)
     await auto_news(context.bot)
+    print("✅ AUTO chạy")
 
-# ===== RUN =====
-async def run_bot():
-    global application, bot_loop
-    bot_loop = asyncio.get_event_loop()
+# ================= WEBHOOK =================
+@app.route("/")
+def home():
+    return "Bot đang chạy!"
+
+@app.route(f"/{TOKEN}", methods=["POST"])
+def hook():
+    data = flask_request.get_json(force=True)
+    update = Update.de_json(data, application.bot)
+    asyncio.run_coroutine_threadsafe(
+        application.process_update(update), loop
+    )
+    return "ok"
+
+# ================= RUN =================
+async def run():
+    global application, loop
+    loop = asyncio.get_event_loop()
 
     application = Application.builder().token(TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.job_queue.run_repeating(scheduler, interval=60)
+    application.job_queue.run_repeating(
+        scheduler, interval=60, first=10
+    )
 
     await application.initialize()
-    await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
+    await application.bot.set_webhook(
+        f"{WEBHOOK_URL}/{TOKEN}"
+    )
     await application.start()
 
     while True:
-        await asyncio.sleep(3600)
+        await asyncio.sleep(999)
 
-def start_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_bot())
-
-def main():
-    threading.Thread(target=start_bot).start()
-    time.sleep(3)
-    app.run(host="0.0.0.0", port=PORT)
+def start():
+    asyncio.run(run())
 
 if __name__ == "__main__":
-    main()
+    threading.Thread(target=start).start()
+    time.sleep(3)
+    app.run(host="0.0.0.0", port=PORT)
